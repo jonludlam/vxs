@@ -50,13 +50,8 @@ type vxs_template_config = {
 	  vxs_root_password : string; 
     
 	  post_install : Blob.t;   (* Called by the host installer *)
-	  initscript : Blob.t;     (* Called on firstboot before firstboot
-							                  scripts! (sets host/dom0 uuid) *)
-	  veryfirstboot : Blob.t;  (* Installed into firstboot.d *)
-	  firstboot : Blob.t; 
-	  id_dsa : Blob.t;
+	  veryfirstboot : Blob.t;  (* Sets host uuid/control domain uuid *)
 	  answerfile : Blob.t;     (* Host installer answerfile *)
-	  vsed : Blob.t;
 }
 
 type vxs_pool_config = {
@@ -144,12 +139,8 @@ let create_hash_vxs host vxs =
 	       "vm_uuid",vxs.vm_uuid;
 	       "vxs_root_password",vxs.vxs_root_password;
 	       "post_install_uuid",vxs.post_install.Blob.u;
-	       "initscript_uuid",vxs.initscript.Blob.u;
 	       "veryfirstboot_uuid",vxs.veryfirstboot.Blob.u;
-	       "firstboot_uuid",vxs.firstboot.Blob.u;
-	       "id_dsa_uuid",vxs.id_dsa.Blob.u;
 	       "answerfile_uuid",vxs.answerfile.Blob.u;
-	       "vsed_uuid",vxs.vsed.Blob.u;
 	  ] in
   let extra = match vxs.ty with
     | Pxe branch -> 
@@ -192,8 +183,6 @@ let get_vxs template host vxs =
   get template h
 
 let get_pxe_config = get_vxs Template.pxe_config_tmpl
-let get_firstboot = get_vxs Template.firstboot_tmpl
-let get_initscript = get_vxs Template.initscript_tmpl
 let get_post_install = get_vxs Template.post_install_tmpl
 let get_answerfile = get_vxs Template.answerfile_tmpl
 let get_veryfirstboot = get_vxs Template.veryfirstboot_tmpl
@@ -441,39 +430,25 @@ let create_xenserver_template host ty disk mem =
     ignore(vbd);
     lwt answerfile = Blob.add_blob rpc session_id vm "answerfile" in
     lwt post_install = Blob.add_blob rpc session_id vm "post_install" in
-    lwt initscript = Blob.add_blob rpc session_id vm "initscript" in
     lwt veryfirstboot = Blob.add_blob rpc session_id vm "veryfirstboot" in
-    lwt firstboot = Blob.add_blob rpc session_id vm "firstboot" in
-    lwt id_dsa = Blob.add_blob rpc session_id vm "id_dsa" in
-    lwt vsed = Blob.add_blob rpc session_id vm "vsed" in
 
     let vxs_template_config = {
       ty;
       vm_uuid;
       vxs_root_password = host.password;
       post_install;
-      initscript;
       veryfirstboot;
-      firstboot;
-      id_dsa;
       answerfile;
-      vsed;
     } in
 
     let blobs = [
       answerfile, get_answerfile;
       post_install, get_post_install;
-      initscript, get_initscript;
       veryfirstboot, get_veryfirstboot;
-      firstboot, get_firstboot;
     ] in
     
     lwt () = Lwt_list.iter_s (fun (x,y) -> 
       Blob.put_blob host session_id x (y host vxs_template_config)) blobs in
-    
-    lwt () = Blob.put_blob host session_id vsed Template.vsed_string in
-    
-    lwt () = copy_dsa host session_id id_dsa in
     
     let linux_cmdline = get_linux_cmdline host vxs_template_config in
     
@@ -671,234 +646,4 @@ let get_server_ip ~rpc ~session_id host =
       Lwt.return server_ip
   in Lwt.return server_ip
 
-let install_wheezy host name =
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    lwt server_ip = get_server_ip ~rpc ~session_id host in
-    lwt [(template_ref,_)] = X.VM.get_all_records_where ~rpc ~session_id
-      ~expr:"field \"is_a_template\" = \"true\" and field \"name__label\" = \"Debian Squeeze 6.0 (64-bit)\"" in
-    Printf.printf "Template %s\n" template_ref;
-    lwt (vm,vm_uuid) = install_from_template rpc session_id template_ref name in
-    lwt _ = create_disk ~rpc ~session_id "Root disk" g8 vm in
-    lwt pools = X.Pool.get_all ~rpc ~session_id in
-    let pool = List.hd pools in
-    lwt master = X.Pool.get_master ~rpc ~session_id  ~self:pool in
-    lwt _ = create_mgmt_vif ~rpc ~session_id master vm in
-    lwt id_rsa = Blob.add_blob rpc session_id vm "id_dsa" in
-    lwt () = copy_dsa host session_id id_rsa in
-    let post_install_tmpl = get_template Template.debian_postinstall_tmpl [
-      "server_ip",server_ip;
-      "id_rsa_blob", id_rsa.Blob.u ] in
-    Printf.printf "post_install_tmpl:\n%s\n" post_install_tmpl;
-    lwt debian_postinstall = Blob.add_blob_with_content host rpc session_id vm "postinstall" post_install_tmpl in
-    let preseed_tmpl = get_template Template.debian_preseed_tmpl
-      [ "vm_root_password",host.password; (* TODO: should be a parameter *)
-	"server_ip",server_ip;
-	"postinstall_blob", debian_postinstall.Blob.u ] in
-    lwt debian_preseed = Blob.add_blob_with_content host rpc session_id vm "preseed" preseed_tmpl in
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"install-repository"
-      ~value:"http://ftp.uk.debian.org/debian" in
-    lwt () = X.VM.remove_from_other_config ~rpc ~session_id ~self:vm ~key:"debian-release" in
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"debian-release"
-      ~value:"wheezy" in
-    let pv_val = Printf.sprintf "auto-install/enable=true url=http://%s/blob?uuid=%s interface=auto netcfg/dhcp_timeout=600 hostname=%s domain=uk.xensource.com" server_ip debian_preseed.Blob.u name in
-    lwt () = X.VM.set_PV_args ~rpc ~session_id ~self:vm ~value:pv_val in
-    (*lwt () = X.VM.start ~rpc ~session_id ~vm ~start_paused:false ~force:false in*)
-    Lwt.return 0
-  )
 
-let install_centos57 host name =
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    lwt server_ip = get_server_ip ~rpc ~session_id host in
-    lwt [(template_ref,_)] = X.VM.get_all_records_where ~rpc ~session_id
-      ~expr:"field \"is_a_template\" = \"true\" and field \"name__label\" = \"CentOS 5 (32-bit)\"" in
-    Printf.printf "Template %s\n" template_ref;
-    lwt (vm,vm_uuid) = install_from_template rpc session_id template_ref name in
-    lwt _ = create_disk ~rpc ~session_id "Root disk" g16 vm in
-    lwt pools = X.Pool.get_all ~rpc ~session_id in
-    let pool = List.hd pools in
-    lwt master = X.Pool.get_master ~rpc ~session_id  ~self:pool in
-    lwt _ = create_mgmt_vif ~rpc ~session_id master vm in
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"install-repository"
-      ~value:"http://www.uk.xensource.com/distros/CentOS/5.7/os/i386" in
-    lwt centos57 = Blob.add_blob_with_content host rpc session_id vm "ks" Template.centos57_tmpl in
-    let pv_val = Printf.sprintf "ks=http://%s/blob?uuid=%s ksdevice=eth0" server_ip centos57.Blob.u in
-    lwt () = X.VM.set_PV_args ~rpc ~session_id ~self:vm ~value:pv_val in
-    lwt () = X.VM.start ~rpc ~session_id ~vm ~start_paused:false ~force:false in
-    Lwt.return 0
-  )
-
-let install_centos65_ks host name ks =
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    lwt server_ip = get_server_ip ~rpc ~session_id host in
-    lwt [(template_ref,_)] = X.VM.get_all_records_where ~rpc ~session_id
-      ~expr:"field \"is_a_template\" = \"true\" and field \"name__label\" = \"CentOS 6 (64-bit)\"" in
-    Printf.printf "Template %s\n" template_ref;
-    lwt (vm,vm_uuid) = install_from_template rpc session_id template_ref name in
-    lwt _ = create_disk ~rpc ~session_id "Root disk" g32 vm in
-    lwt pools = X.Pool.get_all ~rpc ~session_id in
-    let pool = List.hd pools in
-    lwt master = X.Pool.get_master ~rpc ~session_id  ~self:pool in
-    lwt _ = create_mgmt_vif ~rpc ~session_id master vm in
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"install-repository"
-      ~value:"http://www.mirrorservice.org/sites/mirror.centos.org/6.5/os/x86_64/" in
-    lwt centos65 = Blob.add_blob_with_content host rpc session_id vm "ks" ks in
-    let pv_val = Printf.sprintf "ks=http://%s/blob?uuid=%s ksdevice=eth0" server_ip centos65.Blob.u in
-    lwt () = X.VM.set_PV_args ~rpc ~session_id ~self:vm ~value:pv_val in
-    lwt () = vm_cd_add ~rpc ~session_id vm "xs-tools.iso" "3" in
-    lwt uuid = X.VM.get_uuid ~rpc ~session_id ~self:vm in
-    Lwt.return (vm,uuid)
-  )
-
-let install_centos65 host name =
-  lwt (vm,uuid) = install_centos65_ks host name Template.centos64_tmpl in
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    lwt () = X.VM.start ~rpc ~session_id ~vm ~start_paused:false ~force:false in
-    Lwt.return uuid)
-
-
-let install_cloudstack_template host name =
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    lwt networks = X.Network.get_all ~rpc ~session_id in
-    lwt nets = Lwt_list.filter_s (fun net -> 
-      lwt bridge = X.Network.get_bridge ~rpc ~session_id ~self:net in
-      Lwt.return (bridge = "xapi1")) networks in
-    lwt net = 
-      if List.length nets = 0 
-      then X.Network.create ~rpc ~session_id ~name_label:"internal" ~name_description:"Cloudstack internal network" ~mTU:1500L ~other_config:[] ~tags:[]
-      else Lwt.return (List.hd nets)
-    in
-    lwt server_ip = get_server_ip ~rpc ~session_id host in
-    Printf.printf "About to create centos65 vm\n%!";
-    lwt (vm,centos_vm) = install_centos65_ks host name Template.cloudstack_mgmt in
-    Printf.printf "About to create vif\n%!";
-    lwt _ = create_vif_on_net ~rpc ~session_id vm net "1" () in
-    lwt pools = X.Pool.get_all ~rpc ~session_id in
-    let pool = List.hd pools in
-    lwt master = X.Pool.get_master ~rpc ~session_id  ~self:pool in
-    lwt servertime = X.Host.get_servertime ~rpc ~session_id ~host:master in
-    lwt () = X.VM.start ~rpc ~session_id ~vm ~start_paused:false ~force:false in
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"vxs_install_time" ~value:servertime in
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"vxs_ty" ~value:(string_of_installty Cloudstack) in 
-    lwt () = X.VM.add_to_other_config ~rpc ~session_id ~self:vm ~key:"vxs_template" ~value:"true" in 
-
-    lwt () = wait rpc session_id [Printf.sprintf "vm/%s" vm] (function 
-      | Event_helper.VM (_,Some r) ->
-	r.API.vM_power_state = `Halted
-      | _ -> false) in
-
-    lwt () = X.VM.set_is_a_template ~rpc ~session_id ~self:vm ~value:true in
-    lwt () = update_vxs_template_cache ~rpc ~session_id in
-    return centos_vm)
-
-
-let install_cloudstack host cs_template_uuid vxs_template_uuid =
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    Printf.printf "Getting template\n%!";
-
-    lwt templates = get_xenserver_templates rpc session_id in
-    lwt vxs_t = try Lwt.return (List.find (fun x -> x.vxs_uuid = vxs_template_uuid) templates) with _ -> fail (Unknown_template vxs_template_uuid) in
-    lwt cs_t = try Lwt.return (List.find (fun x -> x.vxs_uuid = cs_template_uuid) templates) with _ -> fail (Unknown_template vxs_template_uuid) in
-
-    lwt networks = X.Network.get_all ~rpc ~session_id in
-    lwt nets = Lwt_list.filter_s (fun net -> 
-      lwt bridge = X.Network.get_bridge ~rpc ~session_id ~self:net in
-      Lwt.return (bridge = "xapi1")) networks in
-    let net = List.hd nets in
-    Printf.printf "Creating VXS vm\n%!";
-    lwt (vm,u) = install_from_vxs_template rpc session_id vxs_t.vxs_r "vxs1" in
-    lwt vifs = X.VM.get_VIFs ~rpc ~session_id ~self:vm in
-    lwt _ = Lwt_list.iter_s (fun vif -> X.VIF.destroy ~rpc ~session_id ~self:vif) vifs in
-    Printf.printf "Creating VIF for VXS vm\n%!";
-    lwt vif = create_vif_on_net ~rpc ~session_id vm net "0" ~mAC:"02:00:00:00:00:01" () in
-
-    lwt (cs_vm,cs_u) = install_from_vxs_template rpc session_id cs_t.vxs_r "cs1" in
-    lwt () = X.VM.start ~rpc ~session_id ~vm:cs_vm ~start_paused:false ~force:false in
-    lwt () = X.VM.start ~rpc ~session_id ~vm:vm ~start_paused:false ~force:false in
-
-    return ())
-    
-let create_mirage_image kernel =
-  let fname = "/tmp/mirage.img" in
-  let mnt_path = "/mnt/mirage" in
-  lwt () = Utils.create_extfs_disk fname in
-  lwt () = Utils.mount_extfs mnt_path fname in
-  lwt _ = Lwt_process.exec
-    (Lwt_process.shell (Printf.sprintf "sudo mkdir -p \"%s/boot/grub\"" mnt_path)) in
-  lwt _ = Lwt_process.exec
-    (Lwt_process.shell (Printf.sprintf "sudo chmod a+w \"%s/boot/grub\"" mnt_path)) in
-  lwt _ = Lwt_process.exec
-    (Lwt_process.shell (Printf.sprintf "sudo chmod a+w \"%s/boot\"" mnt_path)) in
-  lwt () = Utils.copy_to_path (mnt_path ^ "/boot/grub/menu.lst") Template.mirage_boot_tmpl in
-  lwt _ = Lwt_process.exec
-    (Lwt_process.shell
-       (Printf.sprintf "sudo gzip -c \"%s\" > \"%s/boot/mirage-os.gz\"" kernel mnt_path)) in
-  lwt _ = Lwt_process.exec
-    (Lwt_process.shell (Printf.sprintf "sudo umount \"%s\"" mnt_path)) in
-  Lwt.return ()
-
-let print_time () =
-  let t = Unix.gmtime (Unix.gettimeofday ()) in
-  Printf.printf "%02d:%02d:%02d%!\n" t.Unix.tm_hour t.Unix.tm_min t.Unix.tm_sec
-
-let install_mirage' rpc session_id host template_ref default_sr contents memory name =
-  lwt (vm,vm_uuid) = install_from_template rpc session_id template_ref name in
-  lwt vdi = create_disk ~rpc ~session_id "Autoinstall disk" m5 vm in
-  lwt () = Utils.put_disk host session_id vdi contents in
-  lwt () = X.VM.set_PV_bootloader ~rpc ~session_id ~self:vm ~value:"pygrub" in
-  lwt () = X.VM.set_HVM_boot_policy ~rpc ~session_id ~self:vm ~value:"" in
-  let mem = Int64.mul meg memory in 
-  lwt () = X.VM.set_memory_limits ~rpc ~session_id ~self:vm ~static_min:mem ~static_max:mem ~dynamic_min:mem ~dynamic_max:mem in
-  lwt boot_params = X.VM.get_HVM_boot_params ~rpc ~session_id ~self:vm in
-  lwt () = Lwt_list.iter_s (fun (k,v) -> X.VM.remove_from_HVM_boot_params ~rpc ~session_id ~self:vm
-    ~key:k) boot_params in
-  (*    lwt () = X.VM.start ~rpc ~session_id ~vm ~start_paused:false ~force:false in *)
-  Lwt.return vm
-
-let generate_names name n =
-  match n with 1 -> [name]
-  | _ -> let rec aux l n =
-	   if n = 0 then l else
-	     let name = name ^ (Printf.sprintf "%03d" n) in
-	     name :: (aux l (n-1))
-	 in
-	 List.rev(aux [] n)
-
-let split list n =
-  let rec aux i acc = function
-    | [] -> List.rev acc, []
-    | h :: t as l -> if i = 0 then List.rev acc, l
-      else aux (i-1) (h :: acc) t  in
-  aux n [] list
-
-let break list n =
-  let rec aux acc = function
-    | [] -> List.rev acc
-    | l -> let (h,t) = split l n in
-	   aux (h :: acc) t in
-  aux [] list
-
-let install_mirage host name kernel n_vms memory =
-  with_rpc_and_session host (fun ~rpc ~session_id ->
-    lwt () = create_mirage_image kernel in
-    lwt server_ip = get_server_ip ~rpc ~session_id host in
-    lwt [(template_ref,_)] = X.VM.get_all_records_where ~rpc ~session_id
-      ~expr:"field \"is_a_template\" = \"true\" and field \"name__label\" = \"Other install media\"" in
-    Printf.printf "Template %s\n" template_ref;
-    lwt pools = X.Pool.get_all ~rpc ~session_id in
-    let pool = List.hd pools in
-    lwt default_sr = X.Pool.get_default_SR ~rpc ~session_id ~self:pool in
-    lwt contents = Utils.read_file "/tmp/mirage.img"  in
-
-    let names = generate_names name n_vms in
-    lwt vm = install_mirage' rpc session_id host template_ref
-    default_sr contents memory (List.hd names) in
-    let name_lists = break (List.tl names) 25 in (* clone 25 VMs at a time *)
-    lwt vms_lists = Lwt_list.map_s (fun names ->      
-      lwt vms = Lwt_list.map_p (fun name -> 
-	lwt new_vm = X.VM.clone ~rpc ~session_id ~vm ~new_name:name in 
-  (*    lwt () = X.VM.start ~rpc ~session_id ~vm:new_vm ~start_paused:false ~force:false in *)
-	Lwt.return new_vm) names in
-      Lwt.return vms) 
-      name_lists in
-    Lwt.return (vm :: (List.concat vms_lists))
-  )
