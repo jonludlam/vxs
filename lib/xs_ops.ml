@@ -52,6 +52,7 @@ type vxs_template_config = {
 	  post_install : Blob.t;   (* Called by the host installer *)
 	  veryfirstboot : Blob.t;  (* Sets host uuid/control domain uuid *)
 	  answerfile : Blob.t;     (* Host installer answerfile *)
+	  chroot_script : Blob.t;  (* Script to execute in chroot'd env *)
 }
 
 type vxs_pool_config = {
@@ -141,6 +142,7 @@ let create_hash_vxs host vxs =
 	       "post_install_uuid",vxs.post_install.Blob.u;
 	       "veryfirstboot_uuid",vxs.veryfirstboot.Blob.u;
 	       "answerfile_uuid",vxs.answerfile.Blob.u;
+	       "chroot_script_uuid",vxs.chroot_script.Blob.u;
 	  ] in
   let extra = match vxs.ty with
     | Pxe branch -> 
@@ -187,6 +189,7 @@ let get_post_install = get_vxs Template.post_install_tmpl
 let get_answerfile = get_vxs Template.answerfile_tmpl
 let get_veryfirstboot = get_vxs Template.veryfirstboot_tmpl
 let get_linux_cmdline = get_vxs Template.linux_cmdline_tmpl
+let get_chroot_script = get_vxs Template.chroot_script_tmpl
 
 let meg = Int64.mul 1024L 1024L
 let gig = Int64.mul 1024L meg
@@ -431,6 +434,7 @@ let create_xenserver_template host ty disk mem =
     lwt answerfile = Blob.add_blob rpc session_id vm "answerfile" in
     lwt post_install = Blob.add_blob rpc session_id vm "post_install" in
     lwt veryfirstboot = Blob.add_blob rpc session_id vm "veryfirstboot" in
+    lwt chroot_script = Blob.add_blob rpc session_id vm "chroot_script" in
 
     let vxs_template_config = {
       ty;
@@ -439,12 +443,14 @@ let create_xenserver_template host ty disk mem =
       post_install;
       veryfirstboot;
       answerfile;
+      chroot_script;
     } in
 
     let blobs = [
       answerfile, get_answerfile;
       post_install, get_post_install;
       veryfirstboot, get_veryfirstboot;
+      chroot_script, get_chroot_script;	    
     ] in
     
     lwt () = Lwt_list.iter_s (fun (x,y) -> 
@@ -491,19 +497,8 @@ let create_xenserver_template host ty disk mem =
       | Event_helper.VM (_,Some r) ->
 	r.API.vM_power_state = `Halted
       | _ -> false) in
-    
-    lwt oc = X.VM.get_other_config ~rpc ~session_id ~self:vm in
-    if List.mem_assoc "vxs_template" oc 
-    then begin
-      lwt () = X.VM.set_is_a_template ~rpc ~session_id ~self:vm ~value:true in
-      lwt () = update_vxs_template_cache ~rpc ~session_id in
-      return vm_uuid
-    end else begin
-      (* Leaking disk if we're using mainiso install type *)
-      lwt () = X.VDI.destroy ~rpc ~session_id ~self:vdi in
-      lwt () = X.VM.destroy ~rpc ~session_id ~self:vm in
-      Lwt.fail (Failure "VM failed to install correctly")
-    end)
+
+      return vm_uuid)
     
     
 exception Unknown_template of string

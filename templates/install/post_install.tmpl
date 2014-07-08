@@ -4,6 +4,7 @@ import urllib2
 import os
 import sys
 import xmlrpclib
+import subprocess
 
 def get_build_number():
     buildnum = None
@@ -21,6 +22,14 @@ localFile.close()
 os.chmod("%s/etc/init.d/veryfirstboot" % sys.argv[1],0755)
 os.symlink("../init.d/veryfirstboot","%s/etc/rc3.d/S03veryfirstboot" % sys.argv[1])
 
+u = urllib2.urlopen("http://${host}/blob?uuid=${chroot_script_uuid}")
+localFile = open('%s/tmp/chroot_script.sh' % sys.argv[1], 'w')
+localFile.write(u.read())
+localFile.close()
+os.chmod("%s/tmp/chroot_script.sh" % sys.argv[1],0755)
+
+subprocess.call("chroot %s /tmp/chroot_script.sh" % sys.argv[1], shell=True)
+
 buildnum=get_build_number()
 print "Build number: %s" % buildnum
 s=xmlrpclib.Server("http://${host}/")
@@ -30,6 +39,8 @@ if "${branch}"=="":
    s.VM.set_name_label(sess,vm,"%s" % buildnum)
 else:
    s.VM.set_name_label(sess,vm,"${branch}-%s" % buildnum)
+   s.VM.add_to_other_config(sess,vm,"vxs_branch","${branch}")
+   s.VM.add_to_other_config(sess,vm,"vxs_version","%s" % buildnum)
 s.VM.add_to_other_config(sess,vm,"vxs_template","true")
 s.session.logout(sess)
 
