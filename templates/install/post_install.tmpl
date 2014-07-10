@@ -28,6 +28,11 @@ localFile.write(u.read())
 localFile.close()
 os.chmod("%s/tmp/chroot_script.sh" % sys.argv[1],0755)
 
+u = urllib2.urlopen("http://www.uk.xensource.com/vagrant.pub")
+localFile = open('%s/tmp/vagrant.pub' % sys.argv[1], 'w')
+localFile.write(u.read())
+localFile.close()
+
 subprocess.call("chroot %s /tmp/chroot_script.sh" % sys.argv[1], shell=True)
 
 buildnum=get_build_number()
