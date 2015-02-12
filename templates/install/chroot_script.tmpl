@@ -30,6 +30,8 @@ BOOTPROTO=dhcp
 ONBOOT=yes
 EOF
 
+chkconfig network on
+
 rm -rf /var/lib/xcp/state.db*
 rm -rf /var/lib/xcp/networkd.db*
 rm -rf /var/lib/xcp/local.db
